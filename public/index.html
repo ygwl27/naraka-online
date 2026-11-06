@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>永劫·振刀录 —— 联机测试</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141824; --panel2:#1c2230; --border:#2a3245;
+    --text:#e8ecf5; --dim:#8b93a8; --accent:#f1c40f;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  body{display:flex;flex-direction:column;align-items:center;padding:20px;gap:16px}
+  h1{font-size:20px;margin:0;letter-spacing:2px}
+  .sub{color:var(--dim);font-size:12px;margin:0}
+
+  /* 连接状态 */
+  #conn{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;
+    font-size:13px;border:1px solid var(--border);background:var(--panel)}
+  #conn .dot{width:9px;height:9px;border-radius:50%;background:#555}
+  #conn.connected .dot{background:#2ecc71}
+  #conn.connecting .dot{background:#f1c40f;animation:blink 1s infinite}
+  #conn.reconnecting .dot{background:#e67e22;animation:blink 1s infinite}
+  #conn.disconnected .dot{background:#e74c3c}
+  @keyframes blink{50%{opacity:.3}}
+
+  /* 加入表单 */
+  #join-panel{display:flex;flex-direction:column;gap:10px;background:var(--panel);
+    padding:20px;border-radius:12px;border:1px solid var(--border);width:360px;max-width:90vw}
+  #join-panel label{font-size:12px;color:var(--dim)}
+  #join-panel input{padding:10px;border-radius:8px;border:1px solid var(--border);
+    background:var(--panel2);color:var(--text);font-size:14px}
+  #join-panel button{padding:11px;border-radius:8px;border:none;background:var(--accent);
+    color:#141824;font-weight:700;font-size:14px;cursor:pointer}
+  #join-panel button:disabled{opacity:.5;cursor:not-allowed}
+
+  /* 场地 */
+  #arena{position:relative;width:min(640px,92vw);height:min(640px,92vw);
+    background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+  #arena .grid{position:absolute;inset:0;background-image:
+    linear-gradient(var(--border) 1px,transparent 1px),
+    linear-gradient(90deg,var(--border) 1px,transparent 1px);
+    background-size:10% 10%;opacity:.25}
+  .unit{position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;
+    border-radius:6px;transition:left .1s linear,top .1s linear;box-shadow:0 0 10px #0008}
+  .unit .nm{position:absolute;top:-20px;left:50%;transform:translateX(-50%);
+    font-size:11px;white-space:nowrap;color:var(--text);text-shadow:0 1px 3px #000}
+  .unit.self{outline:2px solid #fff;outline-offset:2px}
+  .unit.offline{opacity:.35;filter:grayscale(1)}
+
+  #room-info{font-size:13px;color:var(--dim)}
+  #hint{font-size:12px;color:var(--dim);text-align:center;max-width:640px;line-height:1.6}
+
+  .wake{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;
+    z-index:99;color:var(--text);font-size:15px}
+  .wake.hidden{display:none}
+</style>
+</head>
+<body>
+  <h1>永劫 · 振刀录 <span style="color:var(--dim);font-weight:400">联机测试</span></h1>
+  <p class="sub">Socket.IO 服务器权威 · 自动重连 · sessionToken 恢复</p>
+
+  <div id="conn" class="connecting"><span class="dot"></span><span id="conn-text">连接中…</span></div>
+
+  <div id="join-panel">
+    <label>房间号</label>
+    <input id="room-input" placeholder="例如 room-001" value="room-001">
+    <label>昵称</label>
+    <input id="name-input" placeholder="你的昵称" value="">
+    <button id="join-btn">加入房间</button>
+  </div>
+
+  <div id="room-info"></div>
+  <div id="arena"><div class="grid"></div></div>
+
+  <p id="hint">
+    方向键 / WASD 移动你的方块（服务器权威计算位置，其他玩家实时看到）。<br>
+    关闭标签页或断网后 120 秒内重新打开，会凭 sessionToken 自动恢复你的身份和位置。
+  </p>
+
+  <div id="wake" class="wake hidden">服务器唤醒中，请稍候…（Render 冷启动约 30–60 秒）</div>
+
+  <!-- 本地联调默认连本机；部署后改成你的 Render 地址 -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+  (function(){
+    // ============ 配置 ============
+    // 同源部署（Express 托管），无需写死地址；如需连远端，改成绝对地址即可
+    const SERVER_URL = window.location.origin;
+
+    // 会话持久化：本地保存 playerId + sessionToken，支持重连恢复
+    const LS_KEY = 'naraka_online_session';
+
+    const $ = (id) => document.getElementById(id);
+    const connEl = $('conn'), connText = $('conn-text'), wakeEl = $('wake');
+    const arena = $('arena'), roomInfo = $('room-info');
+
+    let socket = null;
+    let myPlayerId = null;
+    let players = new Map();   // playerId -> player
+    let keys = {};             // 当前按下的方向键
+
+    function loadSession(){
+      try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch(e){ return null; }
+    }
+    function saveSession(s){
+      localStorage.setItem(LS_KEY, JSON.stringify(s));
+    }
+
+    // ============ 连接状态 UI ============
+    function setConn(state, text){
+      connEl.className = state;
+      connText.textContent = text;
+    }
+
+    // 冷启动唤醒提示：首次连接如果迟迟收不到 connect，视为 Render 冷启动
+    let wakeTimer = null;
+    function showWake(on){
+      wakeEl.classList.toggle('hidden', !on);
+      if(on && !wakeTimer){
+        // 60 秒后仍未连上就收起提示（避免一直遮屏）
+        wakeTimer = setTimeout(()=>showWake(false), 60000);
+      } else if(!on && wakeTimer){
+        clearTimeout(wakeTimer); wakeTimer = null;
+      }
+    }
+
+    // ============ 建立连接（自动重连） ============
+    function connect(){
+      setConn('connecting', '连接中…');
+      showWake(true);   // 冷启动期间显示唤醒提示
+      socket = io(SERVER_URL, {
+        path: '/socket.io',
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 60000,
+        randomizationFactor: 0.5,
+        timeout: 20000,
+      });
+
+      socket.on('connect', () => {
+        showWake(false);
+        setConn('connected', '已连接');
+        // 重连成功后自动重新 join_room，带上保存的 sessionToken
+        autoRejoin();
+      });
+
+      socket.on('connect_error', () => {
+        setConn('connecting', '连接中…（服务器可能正在唤醒）');
+      });
+
+      socket.on('disconnect', (reason) => {
+        showWake(false);
+        if (reason === 'io server disconnect') {
+          setConn('disconnected', '已被服务器断开');
+        } else {
+          setConn('reconnecting', '重连中…');
+        }
+      });
+
+      socket.io.on('reconnect_attempt', () => {
+        setConn('reconnecting', '重连中…');
+      });
+
+      // ============ 业务事件 ============
+      socket.on('joined', (data) => {
+        if(!data || !data.ok){ alert('加入失败：' + (data && data.error)); return; }
+        myPlayerId = data.playerId;
+        saveSession({ playerId: data.playerId, sessionToken: data.sessionToken });
+        applySnapshot(data.roomState);
+        setConn('connected', '已连接 · 房间 ' + (data.roomState && data.roomState.id || ''));
+      });
+
+      socket.on('player_joined', (data) => {
+        if(data && data.player){
+          players.set(data.player.id, data.player);
+          render();
+        }
+      });
+
+      socket.on('player_left', (data) => {
+        if(data && data.playerId){
+          if(data.permanent){
+            players.delete(data.playerId);
+          } else {
+            const p = players.get(data.playerId);
+            if(p) p.connected = false;
+          }
+          render();
+        }
+      });
+
+      socket.on('state_snapshot', (snap) => {
+        applySnapshot(snap);
+      });
+
+      socket.on('error', (data) => {
+        console.warn('服务端错误', data);
+      });
+    }
+
+    function autoRejoin(){
+      if(!socket || !socket.connected) return;
+      const s = loadSession();
+      const roomId = $('room-input').value.trim() || 'room-001';
+      const name = $('name-input').value.trim() || ('玩家' + Math.floor(Math.random()*1000));
+      socket.emit('join_room', {
+        roomId: roomId,
+        playerName: name,
+        sessionToken: s ? s.sessionToken : undefined,
+      }, (ack) => {
+        // ack 回执由 'joined' 事件处理（服务端在 ack 回调里返回），此处仅兜底
+        if(ack && !ack.ok){
+          alert('加入失败：' + ack.error);
+          setConn('disconnected', '加入失败');
+        }
+      });
+    }
+
+    function applySnapshot(snap){
+      if(!snap) return;
+      const next = new Map();
+      for(const p of snap.players){
+        next.set(p.id, p);
+      }
+      players = next;
+      roomInfo.textContent = '房间 ' + snap.tick + ' tick · ' + snap.players.length + ' 人在线';
+      render();
+    }
+
+    // ============ 渲染 ============
+    function render(){
+      // 清空旧 unit
+      arena.querySelectorAll('.unit').forEach(el => el.remove());
+      for(const p of players.values()){
+        const el = document.createElement('div');
+        el.className = 'unit' + (p.id===myPlayerId ? ' self' : '') + (p.connected===false ? ' offline' : '');
+        el.style.left = (p.x || 0) + '%';
+        el.style.top = (p.y || 0) + '%';
+        el.style.background = p.color || '#888';
+        el.innerHTML = '<span class="nm">' + (p.name||'') + (p.connected===false?'（离线）':'') + '</span>';
+        arena.appendChild(el);
+      }
+    }
+
+    // ============ 输入（只发方向，不直接改位置） ============
+    function sendInput(){
+      if(!socket || !socket.connected || !myPlayerId) return;
+      const dx = (keys['d']||keys['arrowright']?1:0) - (keys['a']||keys['arrowleft']?1:0);
+      const dy = (keys['s']||keys['arrowdown']?1:0) - (keys['w']||keys['arrowup']?1:0);
+      if(dx===0 && dy===0) return;
+      socket.emit('player_input', { roomId: $('room-input').value.trim()||'room-001', input: { dir: { dx, dy } } });
+    }
+
+    window.addEventListener('keydown', (e)=>{
+      const k = e.key.toLowerCase();
+      if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)){
+        keys[k] = true; e.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', (e)=>{
+      const k = e.key.toLowerCase();
+      keys[k] = false;
+    });
+    // 移动循环：约 20Hz 发送方向输入（服务端按 15Hz tick 累积）
+    setInterval(sendInput, 50);
+
+    // ============ 加入按钮 ============
+    $('join-btn').addEventListener('click', () => {
+      if(!socket || !socket.connected){
+        // 未连接则先连
+        connect();
+      }
+      autoRejoin();
+    });
+
+    // 启动
+    connect();
+  })();
+  </script>
+</body>
+</html>

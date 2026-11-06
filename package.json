@@ -1,0 +1,22 @@
+{
+  "name": "naraka-online",
+  "version": "0.1.0",
+  "description": "永劫·振刀录 多人联机服务端（Node.js + Express + Socket.IO，服务器权威）",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  },
+  "license": "MIT"
+}
